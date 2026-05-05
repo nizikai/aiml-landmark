@@ -19,7 +19,7 @@
     }
     </script>
     <!-- MediaPipe Hands — loaded from Google's official CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424926/hands.js"
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"
             crossorigin="anonymous"
             onerror="window._mpHandsLoadError=true"></script>
     
@@ -293,6 +293,16 @@
         // ── MODULE-LEVEL THREE.JS HELPERS ────────────────────────────────────────
         const raycaster = new THREE.Raycaster();
 
+        // Hand skeleton connection pairs — defined here so initThreeScene can use them
+        const HAND_SKELETON = [
+            [0,1],[1,2],[2,3],[3,4],         // thumb
+            [0,5],[5,6],[6,7],[7,8],         // index
+            [5,9],[9,10],[10,11],[11,12],    // middle
+            [9,13],[13,14],[14,15],[15,16],  // ring
+            [13,17],[17,18],[18,19],[19,20], // pinky
+            [0,17],                          // palm base
+        ];
+
         // ── THREE.JS SCENE ────────────────────────────────────────────────────────
         function initThreeScene() {
             // 4.1 Renderer
@@ -382,6 +392,50 @@
             cube.position.set(0, 0, 0);
             scene.add(cube);
             window.interactiveCube = cube;
+
+            // 4.9 3D Hand visualization — joint spheres + bone lines per hand
+            // Each hand gets 21 joint spheres and a LineSegments mesh for bones
+            const HAND_JOINT_RADIUS = 5;
+            const handColors = { left: 0xF67D3E, right: 0xffffff };
+            window.handVisuals = {};
+
+            for (const side of ['left', 'right']) {
+                const color = handColors[side];
+
+                // Joint spheres
+                const jointGeo = new THREE.SphereGeometry(HAND_JOINT_RADIUS, 8, 8);
+                const jointMat = new THREE.MeshStandardMaterial({
+                    color,
+                    emissive: color,
+                    emissiveIntensity: 0.4,
+                    roughness: 0.3,
+                });
+                const joints = [];
+                for (let i = 0; i < 21; i++) {
+                    const mesh = new THREE.Mesh(jointGeo, jointMat);
+                    mesh.visible = false;
+                    scene.add(mesh);
+                    joints.push(mesh);
+                }
+
+                // Bone lines — BufferGeometry with 2 vertices per bone segment
+                const boneCount = HAND_SKELETON.length;
+                const positions = new Float32Array(boneCount * 2 * 3); // 2 points × 3 floats
+                const boneGeo = new THREE.BufferGeometry();
+                boneGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                const boneMat = new THREE.LineBasicMaterial({
+                    color,
+                    transparent: true,
+                    opacity: 0.7,
+                    linewidth: 1,
+                });
+                const boneLines = new THREE.LineSegments(boneGeo, boneMat);
+                boneLines.visible = false;
+                boneLines.frustumCulled = false;
+                scene.add(boneLines);
+
+                window.handVisuals[side] = { joints, boneLines, boneGeo };
+            }
 
             // 4.7 Resize handler
             window.addEventListener('resize', () => {
@@ -567,16 +621,6 @@
             );
         }
 
-        // Hand skeleton connection pairs (subset of MediaPipe HAND_CONNECTIONS)
-        const HAND_SKELETON = [
-            [0,1],[1,2],[2,3],[3,4],         // thumb
-            [0,5],[5,6],[6,7],[7,8],         // index
-            [5,9],[9,10],[10,11],[11,12],    // middle
-            [9,13],[13,14],[14,15],[15,16],  // ring
-            [13,17],[17,18],[18,19],[19,20], // pinky
-            [0,17],                          // palm base
-        ];
-
         // ── HAND SKELETON DRAW ───────────────────────────────────────────────
         function drawHandSkeleton(multiHandLandmarks) {
             if (!multiHandLandmarks || multiHandLandmarks.length === 0) return;
@@ -683,8 +727,8 @@
         function onHandResults(results) {
             console.log('Hand results received:', results.multiHandLandmarks?.length || 0, 'hands');
             classifyGestures(results);
-            // Store landmarks so mainLoop can draw them after the video frame
-            state.latestLandmarks = results.multiHandLandmarks || null;
+            state.latestLandmarks   = results.multiHandLandmarks || null;
+            state._latestHandedness = results.multiHandedness    || null;
         }
 
         // ── HAND CURSORS — draws pinch/index-tip dots on outputCanvas ────────
@@ -725,14 +769,83 @@
             }
         }
 
-        // ── MEDIAPIPE HANDS INIT ──────────────────────────────────────────────
+        // ── 3D HAND VISUALS IN SCENE ─────────────────────────────────────────
+        /**
+         * Maps a normalised MediaPipe landmark {x,y,z} to a Three.js world position.
+         * x/y are in [0,1] video space → mapped to screen NDC → unprojected to a
+         * plane at a fixed Z depth in front of the camera.
+         * The landmark's z value (relative depth) nudges the world Z slightly.
+         */
+        const HAND_WORLD_Z = 200; // base depth plane for hands in the scene
+
+        function landmarkToWorld(lm) {
+            // Mirror X to match the CSS-flipped display
+            const ndcX =  (1 - lm.x) * 2 - 1;
+            const ndcY = -(lm.y * 2 - 1);
+
+            // Unproject NDC onto a plane at HAND_WORLD_Z
+            const camera = window.threeCamera;
+            const dir = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera).sub(camera.position).normalize();
+            const dist = (HAND_WORLD_Z - camera.position.z) / dir.z;
+            const worldPos = camera.position.clone().addScaledVector(dir, dist);
+
+            // Use MediaPipe's relative z to add a small depth offset (closer = further into scene)
+            worldPos.z += lm.z * -200;
+
+            return worldPos;
+        }
+
+        function updateHandVisuals() {
+            if (!state.threeReady || !window.handVisuals) return;
+
+            for (const side of ['left', 'right']) {
+                const visuals   = window.handVisuals[side];
+                const landmarks = state.latestLandmarks
+                    ? (() => {
+                        // Find the landmark array for this side from the latest results
+                        if (!state._latestHandedness) return null;
+                        for (let i = 0; i < state._latestHandedness.length; i++) {
+                            const mpLabel = state._latestHandedness[i].label;
+                            const mappedSide = mpLabel === 'Left' ? 'right' : 'left';
+                            if (mappedSide === side) return state.latestLandmarks[i];
+                        }
+                        return null;
+                    })()
+                    : null;
+
+                if (!landmarks) {
+                    // Hide all visuals for this hand
+                    visuals.joints.forEach(j => { j.visible = false; });
+                    visuals.boneLines.visible = false;
+                    continue;
+                }
+
+                // Update joint positions
+                const worldPositions = landmarks.map(lm => landmarkToWorld(lm));
+                visuals.joints.forEach((joint, i) => {
+                    joint.position.copy(worldPositions[i]);
+                    joint.visible = true;
+                });
+
+                // Update bone line positions
+                const posAttr = visuals.boneGeo.getAttribute('position');
+                HAND_SKELETON.forEach(([a, b], i) => {
+                    const pa = worldPositions[a];
+                    const pb = worldPositions[b];
+                    posAttr.setXYZ(i * 2,     pa.x, pa.y, pa.z);
+                    posAttr.setXYZ(i * 2 + 1, pb.x, pb.y, pb.z);
+                });
+                posAttr.needsUpdate = true;
+                visuals.boneLines.visible = true;
+            }
+        }
         async function initMediaPipeHands() {
             console.log('=== MediaPipe Hands Initialization Started ===');
 
             // Try loading from multiple CDNs in order
             const cdnUrls = [
-                'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424926/hands.js',
-                'https://unpkg.com/@mediapipe/hands@0.4.1646424926/hands.js',
+                'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js',
+                'https://unpkg.com/@mediapipe/hands@0.4.1646424915/hands.js',
             ];
 
             // If the static script tag already loaded it, skip dynamic loading
@@ -776,7 +889,7 @@
                 const hands = new Hands({
                     locateFile: (file) => {
                         // Use the same CDN that successfully loaded hands.js
-                        const url = `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424926/${file}`;
+                        const url = `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
                         console.log('  locateFile:', file, '→', url);
                         return url;
                     },
@@ -925,7 +1038,7 @@
                         const t2 = Math.max(0, Math.min(1,
                             (bboxWidth - CONFIG.HAND_SIZE_MIN) / (CONFIG.HAND_SIZE_MAX - CONFIG.HAND_SIZE_MIN)
                         ));
-                        const targetZ = CONFIG.DEPTH_MAX - t2 * (CONFIG.DEPTH_MAX - CONFIG.DEPTH_MIN);
+                        const targetZ = CONFIG.DEPTH_MIN + t2 * (CONFIG.DEPTH_MAX - CONFIG.DEPTH_MIN);
                         cube.position.z += (targetZ - cube.position.z) * CONFIG.DEPTH_LERP;
                         cube.position.z = Math.max(CONFIG.DEPTH_MIN, Math.min(CONFIG.DEPTH_MAX, cube.position.z));
                     }
@@ -1072,6 +1185,7 @@
             if (state.threeReady) {
                 updateCamera();
                 updateInteraction();
+                updateHandVisuals();
                 window.threeRenderer.render(window.threeScene, window.threeCamera);
             }
 
