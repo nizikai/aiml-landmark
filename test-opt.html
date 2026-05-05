@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nico Prasetyo | AIML Exploration</title>
+    
+    <link rel="icon" type="image/png" href="assets/icon.png">
+    <link rel="apple-touch-icon" href="assets/icon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;700&display=swap" rel="stylesheet">
+    
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+    <!-- MediaPipe Hands will be loaded dynamically -->
+    
+    <style>
+        body { margin: 0; overflow: hidden; background: #ffffff; font-family: 'Geist Mono', monospace; }
+
+        #loader-overlay {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background-color: #ffffff; z-index: 9998;
+            display: none; flex-direction: column; justify-content: center; align-items: center;
+            transition: opacity 1s ease-out;
+        }
+        #loader-overlay.fade-out { opacity: 0; pointer-events: none; }
+
+        #canvas3d { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; outline: none; }
+
+        #video-overlay {
+            position: fixed; top: 30px; right: 30px;
+            width: 160px; height: 120px;
+            z-index: 9999;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            background: #000; 
+            border: 2px solid white; 
+            opacity: 0; transform: translateY(-10px);
+            transition: opacity 1s ease, transform 1s ease;
+        }
+        #video-overlay.visible { opacity: 1; transform: translateY(0); }
+
+        #videoFeed { position: absolute; width: 1px; height: 1px; opacity: 0; }
+        #outputCanvas { display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+
+        #hud-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 10;
+            box-sizing: border-box;
+            transition: box-shadow 0.2s ease-out;
+        }
+        #hud-layer.highlight-left { box-shadow: inset 15px 0 0 0 #F67D3E; }
+        #hud-layer.highlight-right { box-shadow: inset -15px 0 0 0 #F67D3E; }
+        #hud-layer.highlight-both { box-shadow: inset 0 0 0 8px #F67D3E; }
+
+        #camera-msg {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #222; color: #888;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            text-align: center; font-size: 11px; padding: 10px; box-sizing: border-box;
+            z-index: 5; transition: opacity 0.5s ease;
+        }
+        #camera-msg.hidden { opacity: 0; pointer-events: none; }
+        #camera-msg.error { background: #330000; color: #ff6b6b; font-weight: bold; }
+
+        #label-container {
+            position: absolute; bottom: 0; left: 0;
+            width: 100%; background: rgba(0, 0, 0, 0.85); padding: 8px; box-sizing: border-box;
+            color: white; font-size: 10px; display: flex; flex-direction: column; gap: 5px;
+            border-top: 1px solid rgba(255,255,255,0.2);
+            z-index: 20;
+        }
+        .label-row { display: flex; justify-content: space-between; align-items: center; }
+        .label-bar-bg { width: 50px; height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; overflow: hidden; }
+        .label-bar-fill { height: 100%; background: #F67D3E; width: 0%; transition: width 0.1s linear; }
+
+        #mobile-notice {
+            display: none;
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: #ffffff; z-index: 99999;
+            flex-direction: column; justify-content: center; align-items: center;
+            text-align: center; padding: 40px; box-sizing: border-box;
+            font-family: 'Geist Mono', monospace;
+        }
+        #mobile-notice .notice-icon { font-size: 48px; margin-bottom: 24px; }
+        #mobile-notice h2 { font-size: 18px; font-weight: bold; margin: 0 0 12px; color: #111; }
+        #mobile-notice p { font-size: 13px; color: #666; line-height: 1.6; margin: 0; }
+        #mobile-notice .notice-url { margin-top: 20px; font-size: 12px; color: #F67D3E; word-break: break-all; }
+
+        #debug-info {
+            position: fixed; bottom: 20px; left: 20px;
+            background: rgba(0, 0, 0, 0.8); color: #fff;
+            padding: 10px; font-size: 11px; font-family: 'Geist Mono', monospace;
+            border-radius: 4px; z-index: 10000;
+            max-width: 300px;
+        }
+        #debug-info .status-line { margin: 2px 0; }
+        #debug-info .ready { color: #4ade80; }
+        #debug-info .not-ready { color: #f87171; }
+
+        @media (max-width: 768px) {
+            #mobile-notice { display: flex; }
+        }
+    </style>
+
+    <script>
+        window.appState = { cvLoaded: false };
+        function onOpenCvReady() {
+            window.appState.cvLoaded = true;
+            window.dispatchEvent(new Event('opencv-ready'));
+        }
+        
+        // Check if MediaPipe scripts loaded
+        window.addEventListener('load', () => {
+            console.log('Page loaded. Checking MediaPipe availability...');
+            console.log('Hands available:', typeof Hands !== 'undefined');
+            console.log('Camera available:', typeof Camera !== 'undefined');
+            
+            // If not available, log what IS available
+            if (typeof Hands === 'undefined') {
+                console.error('MediaPipe Hands not loaded! Check Network tab for failed requests.');
+                console.log('Available globals:', Object.keys(window).filter(k => k.includes('media') || k.includes('Media')));
+            }
+        });
+    </script>
+</head>
+<body>
+
+    <div id="mobile-notice">
+        <h2>Best viewed on desktop</h2>
+        <p>This experience is optimized for a desktop browser.</p>
+    </div>
+
+    <div id="loader-overlay"></div>
+
+    <div id="video-overlay">
+        <video id="videoFeed" autoplay playsinline muted></video>
+        <canvas id="outputCanvas"></canvas>
+        <div id="camera-msg"><span>Allow Camera<br>to Start</span></div>
+        <div id="hud-layer"></div>
+        <div id="label-container" style="display: none;"></div>
+    </div>
+
+    <canvas id="canvas3d" tabindex="1"></canvas>
+    <canvas id="processingCanvas" width="160" height="120" style="display:none;"></canvas>
+
+    <div id="debug-info">
+        <div class="status-line">Camera: <span id="debug-camera" class="not-ready">Not Ready</span></div>
+        <div class="status-line">Three.js: <span id="debug-three" class="not-ready">Not Ready</span></div>
+        <div class="status-line">MediaPipe: <span id="debug-hands" class="not-ready">Not Ready</span></div>
+        <div class="status-line">OpenCV: <span id="debug-cv" class="not-ready">Not Ready</span></div>
+        <div class="status-line">Hands Detected: <span id="debug-hands-count">0</span></div>
+        <div class="status-line">Left Gesture: <span id="debug-left-gesture">none</span></div>
+        <div class="status-line">Right Gesture: <span id="debug-right-gesture">none</span></div>
+        <div class="status-line">Interaction: <span id="debug-interaction">idle</span></div>
+    </div>
+
+<script async src="opencv.js" onload="onOpenCvReady()"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // ── CONFIG ────────────────────────────────────────────────────────────────
+        const CONFIG = {
+            FACE_CASCADE_URL:        'haarcascade_frontalface_default.xml',
+            FACE_FPS:                20,
+            HANDS_FPS:               30,
+            DRAW_FPS:                60,
+            PINCH_THRESHOLD:         0.08,
+            GESTURE_DEBOUNCE_FRAMES: 3,
+            CAMERA_LERP:             0.08,
+            CAMERA_X_SENSITIVITY:    160,
+            CAMERA_Y_SENSITIVITY:    120,
+            CAMERA_Z_NEAR:           450,   // camera Z when face is close (lean in)
+            CAMERA_Z_FAR:            750,   // camera Z when face is far (lean back)
+            FACE_SIZE_NEAR:          0.45,  // face bbox width / canvas width when very close
+            FACE_SIZE_FAR:           0.15,  // face bbox width / canvas width when far away
+            FACE_LOST_TIMEOUT_MS:    500,
+            DEPTH_MIN:               -300,
+            DEPTH_MAX:                300,
+            HAND_SIZE_MIN:            0.10,
+            HAND_SIZE_MAX:            0.40,
+            DEPTH_LERP:               0.10,
+            ROTATE_SENSITIVITY:       5.0,
+            TWO_HAND_SENSITIVITY:     3.0,
+        };
+
+        // ── STATE ─────────────────────────────────────────────────────────────────
+        const state = {
+            // Readiness flags
+            cameraReady: false,
+            threeReady:  false,
+            handsReady:  false,
+            cvReady:     false,
+
+            // Face detection
+            currentFaceRect:      null,   // { x, y, width, height } in outputCanvas coords
+            lastFaceDetectedTime: 0,
+
+            // Camera parallax target (updated by face detection, consumed by Camera_Controller)
+            cameraTarget: { normX: 0, normY: 0, normSize: 0 },
+
+            // Gesture state (updated by Gesture_Classifier)
+            gestureState: {
+                left:  { gesture: 'none', pinchPoint: null, indexTip: null, bbox: null },
+                right: { gesture: 'none', pinchPoint: null, indexTip: null, bbox: null },
+                twoHandPinch: false,
+            },
+
+            // Interaction state (updated by Interaction_Manager)
+            interaction: {
+                mode:              'idle',   // 'idle' | 'grabbed' | 'pointed' | 'two_hand_rotate'
+                targetObject:      null,     // THREE.Mesh | null
+                grabOffset:        null,     // THREE.Vector3 offset at grab time
+                prevPinchMidpoint: null,     // for two-hand rotation delta
+                prevTwoHandVec:    null,     // { x, y } vector between pinch points
+                prevIndexPos:      null,     // for point-rotate velocity
+            },
+
+            // Gesture debounce buffers
+            debounce: {
+                left:  { candidate: 'none', count: 0 },
+                right: { candidate: 'none', count: 0 },
+            },
+
+            // Latest raw landmarks from MediaPipe (stored for drawing in mainLoop)
+            latestLandmarks: null,
+        };
+
+        // ── WEBCAM ────────────────────────────────────────────────────────────────
+        async function initWebcam() {
+            const video       = document.getElementById('videoFeed');
+            const outputCanvas = document.getElementById('outputCanvas');
+            const videoOverlay = document.getElementById('video-overlay');
+            const cameraMsg   = document.getElementById('camera-msg');
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'user',
+                        width:  { ideal: 640 },
+                        height: { ideal: 480 },
+                    },
+                });
+
+                video.srcObject = stream;
+
+                // Wait until the video dimensions are known before reading them
+                await new Promise((resolve) => {
+                    video.addEventListener('loadedmetadata', resolve, { once: true });
+                });
+
+                outputCanvas.width  = video.videoWidth;
+                outputCanvas.height = video.videoHeight;
+
+                state.cameraReady = true;
+
+                videoOverlay.classList.add('visible');
+                cameraMsg.classList.add('hidden');
+
+                console.log('Webcam ready! Video dimensions:', video.videoWidth, 'x', video.videoHeight);
+                console.log('Output canvas dimensions:', outputCanvas.width, 'x', outputCanvas.height);
+
+                // Start the main render loop immediately — Three.js / MediaPipe
+                // do not need to be ready yet.
+                requestAnimationFrame(mainLoop);
+
+            } catch (err) {
+                cameraMsg.classList.add('error');
+                const span = cameraMsg.querySelector('span') || cameraMsg;
+                span.textContent = `Camera error: ${err.message || err.name || 'Access denied'}`;
+                // state.cameraReady intentionally left false
+            }
+        }
+
+        // ── MODULE-LEVEL OPENCV HELPERS ──────────────────────────────────────────
+        let classifier = null;
+
+        // ── MODULE-LEVEL MEDIAPIPE HANDS INSTANCE ────────────────────────────────
+        let handsInstance = null;
+
+        // ── MODULE-LEVEL THREE.JS HELPERS ────────────────────────────────────────
+        const raycaster = new THREE.Raycaster();
+
+        // ── THREE.JS SCENE ────────────────────────────────────────────────────────
+        function initThreeScene() {
+            // 4.1 Renderer
+            const canvas = document.getElementById('canvas3d');
+            const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            window.threeRenderer = renderer;
+
+            // 4.2 Camera
+            const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 2000);
+            camera.position.set(0, 0, 600);
+            camera.lookAt(0, 0, 0);
+            window.threeCamera = camera;
+
+            // 4.3 Scene
+            const scene = new THREE.Scene();
+            window.threeScene = scene;
+
+            // 4.4 Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            dirLight.position.set(200, 400, 300);
+            scene.add(dirLight);
+
+            // 4.5 Room — six PlaneGeometry meshes forming an enclosed room
+            const roomSize = 1200;
+            const half = roomSize / 2;
+
+            const roomPlanes = [
+                // Floor: rotated -90° on X, y = -600
+                {
+                    color: 0xf5f0e8,
+                    position: [0, -half, 0],
+                    rotation: [-Math.PI / 2, 0, 0],
+                },
+                // Ceiling: rotated +90° on X, y = +600
+                {
+                    color: 0xffffff,
+                    position: [0, half, 0],
+                    rotation: [Math.PI / 2, 0, 0],
+                },
+                // Back wall: z = -600 (faces camera, no rotation)
+                {
+                    color: 0xfaf8f5,
+                    position: [0, 0, -half],
+                    rotation: [0, 0, 0],
+                },
+                // Left wall: rotated +90° on Y, x = -600
+                {
+                    color: 0xfaf8f5,
+                    position: [-half, 0, 0],
+                    rotation: [0, Math.PI / 2, 0],
+                },
+                // Right wall: rotated -90° on Y, x = +600
+                {
+                    color: 0xfaf8f5,
+                    position: [half, 0, 0],
+                    rotation: [0, -Math.PI / 2, 0],
+                },
+                // Front wall: rotated 180° on Y, z = +600 (behind camera)
+                {
+                    color: 0xfaf8f5,
+                    position: [0, 0, half],
+                    rotation: [0, Math.PI, 0],
+                },
+            ];
+
+            for (const def of roomPlanes) {
+                const geo = new THREE.PlaneGeometry(roomSize, roomSize);
+                const mat = new THREE.MeshStandardMaterial({
+                    color: def.color,
+                    side: THREE.DoubleSide,
+                });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(...def.position);
+                mesh.rotation.set(...def.rotation);
+                scene.add(mesh);
+            }
+
+            // 4.6 Interactive cube
+            const cubeGeo = new THREE.BoxGeometry(80, 80, 80);
+            const cubeMat = new THREE.MeshStandardMaterial({ color: 0x4a90d9 });
+            const cube = new THREE.Mesh(cubeGeo, cubeMat);
+            cube.position.set(0, 0, 0);
+            scene.add(cube);
+            window.interactiveCube = cube;
+
+            // 4.7 Resize handler
+            window.addEventListener('resize', () => {
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+            });
+
+            // 4.8 Mark scene as ready
+            state.threeReady = true;
+        }
+
+        // Initialise Three.js scene immediately
+        initThreeScene();
+
+        // ── OPENCV INIT ───────────────────────────────────────────────────────
+        async function initOpenCv() {
+            // 5.1 Wait for opencv-ready (or already loaded)
+            if (!window.appState.cvLoaded) {
+                await new Promise((resolve) => {
+                    window.addEventListener('opencv-ready', resolve, { once: true });
+                });
+            }
+
+            // 5.2 Poll until window.cv and window.cv.CascadeClassifier are available
+            await new Promise((resolve) => {
+                const check = () => {
+                    if (window.cv && window.cv.CascadeClassifier) {
+                        resolve();
+                    } else {
+                        setTimeout(check, 50);
+                    }
+                };
+                check();
+            });
+
+            // 5.3 Fetch the Haar cascade XML, write to OpenCV FS, and load classifier
+            try {
+                const response = await fetch(CONFIG.FACE_CASCADE_URL);
+                const buffer = await response.arrayBuffer();
+                window.cv.FS_createDataFile('/', 'haarcascade_frontalface_default.xml', new Uint8Array(buffer), true, false, false);
+                classifier = new window.cv.CascadeClassifier();
+                classifier.load('haarcascade_frontalface_default.xml');
+            } catch (_err) {
+                // Silently swallow failures — face detection will be skipped
+            }
+
+            // 5.4 Mark OpenCV as ready regardless of whether the classifier loaded
+            state.cvReady = true;
+        }
+
+        // ── GESTURE CLASSIFIER ───────────────────────────────────────────────
+
+        /**
+         * Computes the 2D Euclidean distance between two normalised landmarks.
+         * @param {{ x: number, y: number }} a
+         * @param {{ x: number, y: number }} b
+         * @returns {number}
+         */
+        function dist2D(a, b) {
+            return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+        }
+
+        /**
+         * Classifies a single hand's gesture from its 21 MediaPipe landmarks.
+         * Priority: pinch > point > open_hand > none.
+         * @param {Array<{ x: number, y: number, z: number }>} landmarks
+         * @returns {'pinch' | 'point' | 'open_hand' | 'none'}
+         */
+        function classifyGesture(landmarks) {
+            // Pinch: thumb tip (4) close to index tip (8)
+            if (dist2D(landmarks[4], landmarks[8]) < CONFIG.PINCH_THRESHOLD) {
+                return 'pinch';
+            }
+
+            const indexExtended = landmarks[8].y  < landmarks[5].y;
+            const middleCurled  = landmarks[12].y > landmarks[9].y;
+            const ringCurled    = landmarks[16].y > landmarks[13].y;
+            const pinkyCurled   = landmarks[20].y > landmarks[17].y;
+
+            const middleExtended = landmarks[12].y < landmarks[9].y;
+            const ringExtended   = landmarks[16].y < landmarks[13].y;
+            const pinkyExtended  = landmarks[20].y < landmarks[17].y;
+
+            // Point: index extended, middle/ring/pinky curled
+            if (indexExtended && middleCurled && ringCurled && pinkyCurled) {
+                return 'point';
+            }
+
+            // Open hand: all four fingers extended
+            if (indexExtended && middleExtended && ringExtended && pinkyExtended) {
+                return 'open_hand';
+            }
+
+            return 'none';
+        }
+
+        /**
+         * Processes MediaPipe Hands results and updates state.gestureState
+         * with debounced gesture classifications for each hand.
+         * @param {{ multiHandLandmarks: Array, multiHandedness: Array }} results
+         */
+        function classifyGestures(results) {
+            const multiHandLandmarks = results.multiHandLandmarks || [];
+            const multiHandedness    = results.multiHandedness    || [];
+
+            // Determine which hands are present this frame
+            const handsPresent = { left: false, right: false };
+            const handsLandmarks = { left: null, right: null };
+
+            for (let i = 0; i < multiHandedness.length; i++) {
+                const mpLabel = multiHandedness[i].label; // 'Left' or 'Right' from MediaPipe (camera perspective)
+                // Flip for mirror display: MediaPipe 'Left' → our 'right', and vice versa
+                const hand = mpLabel === 'Left' ? 'right' : 'left';
+                handsPresent[hand]   = true;
+                handsLandmarks[hand] = multiHandLandmarks[i];
+            }
+
+            // Process each hand
+            for (const hand of ['left', 'right']) {
+                if (!handsPresent[hand]) {
+                    // 7.8 Hand absent — reset gesture state and debounce buffer
+                    state.gestureState[hand] = { gesture: 'none', pinchPoint: null, indexTip: null, bbox: null };
+                    state.debounce[hand]     = { candidate: 'none', count: 0 };
+                    continue;
+                }
+
+                const landmarks = handsLandmarks[hand];
+
+                // 7.2 Raw gesture classification
+                const raw = classifyGesture(landmarks);
+
+                // 7.3 Debounce buffer logic
+                if (raw === state.debounce[hand].candidate) {
+                    state.debounce[hand].count++;
+                    if (state.debounce[hand].count >= CONFIG.GESTURE_DEBOUNCE_FRAMES) {
+                        // Commit the gesture
+                        state.gestureState[hand].gesture = raw;
+                    }
+                } else {
+                    // Reset candidate
+                    state.debounce[hand].candidate = raw;
+                    state.debounce[hand].count     = 1;
+                }
+
+                const committed = state.gestureState[hand].gesture;
+
+                // 7.4 Pinch point — mirror X to match the CSS-flipped display
+                if (committed === 'pinch') {
+                    state.gestureState[hand].pinchPoint = {
+                        x: 1 - (landmarks[4].x + landmarks[8].x) / 2,
+                        y: (landmarks[4].y + landmarks[8].y) / 2,
+                    };
+                } else {
+                    state.gestureState[hand].pinchPoint = null;
+                }
+
+                // 7.5 Index tip for point gesture — mirror X
+                if (committed === 'point') {
+                    state.gestureState[hand].indexTip = {
+                        x: 1 - landmarks[8].x,
+                        y: landmarks[8].y,
+                    };
+                } else {
+                    state.gestureState[hand].indexTip = null;
+                }
+
+                // 7.6 Bounding box over all 21 landmarks
+                const xs = landmarks.map(l => l.x);
+                const ys = landmarks.map(l => l.y);
+                state.gestureState[hand].bbox = {
+                    minX: Math.min(...xs),
+                    maxX: Math.max(...xs),
+                    minY: Math.min(...ys),
+                    maxY: Math.max(...ys),
+                };
+            }
+
+            // 7.7 Two-hand pinch flag
+            state.gestureState.twoHandPinch = (
+                state.gestureState.left.gesture  === 'pinch' &&
+                state.gestureState.right.gesture === 'pinch'
+            );
+        }
+
+        // Hand skeleton connection pairs (subset of MediaPipe HAND_CONNECTIONS)
+        const HAND_SKELETON = [
+            [0,1],[1,2],[2,3],[3,4],         // thumb
+            [0,5],[5,6],[6,7],[7,8],         // index
+            [5,9],[9,10],[10,11],[11,12],    // middle
+            [9,13],[13,14],[14,15],[15,16],  // ring
+            [13,17],[17,18],[18,19],[19,20], // pinky
+            [0,17],                          // palm base
+        ];
+
+        // ── HAND SKELETON DRAW ───────────────────────────────────────────────
+        function drawHandSkeleton(multiHandLandmarks) {
+            if (!multiHandLandmarks || multiHandLandmarks.length === 0) return;
+
+            const outputCanvas = document.getElementById('outputCanvas');
+            const outputCtx = outputCanvas.getContext('2d');
+            const w = outputCanvas.width;
+            const h = outputCanvas.height;
+
+            for (const landmarks of multiHandLandmarks) {
+                // Draw connections — mirror x to match the CSS scaleX(-1) on the canvas
+                for (const [startIdx, endIdx] of HAND_SKELETON) {
+                    const start = landmarks[startIdx];
+                    const end   = landmarks[endIdx];
+                    outputCtx.beginPath();
+                    outputCtx.moveTo((1 - start.x) * w, start.y * h);
+                    outputCtx.lineTo((1 - end.x)   * w, end.y   * h);
+                    outputCtx.strokeStyle = 'rgba(255,255,255,0.8)';
+                    outputCtx.lineWidth = 2;
+                    outputCtx.stroke();
+                }
+
+                // Draw each of the 21 landmarks as a filled circle
+                for (const landmark of landmarks) {
+                    outputCtx.beginPath();
+                    outputCtx.arc((1 - landmark.x) * w, landmark.y * h, 4, 0, Math.PI * 2);
+                    outputCtx.fillStyle = '#F67D3E';
+                    outputCtx.fill();
+                }
+            }
+        }
+
+        // ── FACE DETECTION ───────────────────────────────────────────────────
+        function detectFace() {
+            // 9.1 Guard
+            if (!state.cvReady || !classifier || classifier.empty()) return;
+
+            const video = document.getElementById('videoFeed');
+            const processingCanvas = document.getElementById('processingCanvas');
+            const outputCanvas = document.getElementById('outputCanvas');
+            const pCtx = processingCanvas.getContext('2d', { willReadFrequently: true });
+
+            // processingCanvas is 160x120 (set in HTML)
+            pCtx.drawImage(video, 0, 0, processingCanvas.width, processingCanvas.height);
+
+            // Scale factor from processing canvas to output canvas
+            const scaleX = outputCanvas.width  / processingCanvas.width;
+            const scaleY = outputCanvas.height / processingCanvas.height;
+
+            let src = null, gray = null, faces = null;
+            try {
+                src  = window.cv.imread(processingCanvas);
+                gray = new window.cv.Mat();
+                window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY);
+
+                faces = new window.cv.RectVector();
+                const msize = new window.cv.Size(0, 0);
+                classifier.detectMultiScale(gray, faces, 1.1, 3, 0, msize, msize);
+
+                if (faces.size() > 0) {
+                    // Find the largest face rect
+                    let largest = null;
+                    for (let i = 0; i < faces.size(); i++) {
+                        const f = faces.get(i);
+                        if (!largest || f.width * f.height > largest.width * largest.height) {
+                            largest = f;
+                        }
+                    }
+
+                    // 9.3 Scale to output canvas coords
+                    state.currentFaceRect = {
+                        x:      largest.x      * scaleX,
+                        y:      largest.y      * scaleY,
+                        width:  largest.width  * scaleX,
+                        height: largest.height * scaleY,
+                    };
+                    state.lastFaceDetectedTime = Date.now();
+
+                    // 9.4 Normalise face centre to [-1, 1], mirror X to match display
+                    const cx = 1 - (largest.x + largest.width  / 2) / processingCanvas.width;
+                    const cy = (largest.y + largest.height / 2) / processingCanvas.height;
+                    state.cameraTarget.normX    = cx * 2 - 1;
+                    state.cameraTarget.normY    = cy * 2 - 1;
+                    // normSize: face width as fraction of canvas width (bigger = closer)
+                    state.cameraTarget.normSize = largest.width / processingCanvas.width;
+                } else {
+                    // 9.5 No face detected — check timeout
+                    if (Date.now() - state.lastFaceDetectedTime > CONFIG.FACE_LOST_TIMEOUT_MS) {
+                        state.cameraTarget = { normX: 0, normY: 0, normSize: 0 };
+                        state.currentFaceRect = null;
+                    }
+                }
+            } catch (_err) {
+                // Silently ignore errors
+            } finally {
+                // 9.6 Clean up all mats
+                if (src)   src.delete();
+                if (gray)  gray.delete();
+                if (faces) faces.delete();
+            }
+        }
+
+        // ── MEDIAPIPE HANDS RESULTS CALLBACK ─────────────────────────────────
+        function onHandResults(results) {
+            console.log('Hand results received:', results.multiHandLandmarks?.length || 0, 'hands');
+            classifyGestures(results);
+            // Store landmarks so mainLoop can draw them after the video frame
+            state.latestLandmarks = results.multiHandLandmarks || null;
+        }
+
+        // ── HAND CURSORS — draws pinch/index-tip dots on outputCanvas ────────
+        function drawHandCursors() {
+            const outputCanvas = document.getElementById('outputCanvas');
+            const ctx = outputCanvas.getContext('2d');
+            const w = outputCanvas.width;
+            const h = outputCanvas.height;
+
+            for (const hand of ['left', 'right']) {
+                const gs = state.gestureState[hand];
+
+                // Pinch cursor — already mirrored in gestureState
+                if (gs.pinchPoint) {
+                    const cx = gs.pinchPoint.x * w;
+                    const cy = gs.pinchPoint.y * h;
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+                    ctx.strokeStyle = state.interaction.mode === 'grabbed' ? '#4a90d9' : '#F67D3E';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fill();
+                }
+
+                // Index tip cursor — already mirrored in gestureState
+                if (gs.indexTip) {
+                    const cx = gs.indexTip.x * w;
+                    const cy = gs.indexTip.y * h;
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+                    ctx.strokeStyle = state.interaction.mode === 'pointed' ? '#ffcc00' : 'rgba(255,255,255,0.6)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        // ── MEDIAPIPE HANDS INIT ──────────────────────────────────────────────
+        async function initMediaPipeHands() {
+            console.log('=== MediaPipe Hands Initialization Started ===');
+            
+            // Dynamically load the MediaPipe Hands script
+            try {
+                console.log('Step 1: Loading MediaPipe Hands script from CDN...');
+                await new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js';
+                    script.crossOrigin = 'anonymous';
+                    script.onload = () => {
+                        console.log('✓ MediaPipe Hands script loaded successfully');
+                        resolve();
+                    };
+                    script.onerror = (err) => {
+                        console.error('✗ Failed to load MediaPipe Hands script:', err);
+                        console.error('  URL:', script.src);
+                        console.error('  This might be a network issue or CORS problem');
+                        reject(err);
+                    };
+                    document.head.appendChild(script);
+                });
+            } catch (err) {
+                console.error('Failed to load script, aborting MediaPipe initialization');
+                return;
+            }
+            
+            // Wait for the Hands constructor to be available
+            console.log('Step 2: Waiting for Hands constructor to be available...');
+            
+            let attempts = 0;
+            const maxAttempts = 100; // 5 seconds max wait
+            
+            try {
+                await new Promise((resolve, reject) => {
+                    const check = () => {
+                        attempts++;
+                        
+                        if (typeof Hands !== 'undefined') {
+                            console.log('✓ Hands constructor is available!');
+                            console.log('  Type:', typeof Hands);
+                            resolve();
+                        } else if (attempts >= maxAttempts) {
+                            console.error('✗ Hands constructor not available after 5 seconds');
+                            console.error('  Attempts:', attempts);
+                            console.error('  Available window properties:', Object.keys(window).filter(k => k.toLowerCase().includes('hand')));
+                            reject(new Error('MediaPipe Hands timeout'));
+                        } else {
+                            if (attempts % 20 === 0) {
+                                console.log(`  Still waiting... (attempt ${attempts}/${maxAttempts})`);
+                            }
+                            setTimeout(check, 50);
+                        }
+                    };
+                    check();
+                });
+            } catch (err) {
+                console.error('Failed waiting for Hands constructor, aborting');
+                return;
+            }
+
+            console.log('Step 3: Creating Hands instance...');
+            try {
+                const hands = new Hands({
+                    locateFile: (file) => {
+                        const url = `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                        console.log('  MediaPipe requesting file:', file);
+                        return url;
+                    },
+                });
+
+                console.log('Step 4: Setting Hands options...');
+                hands.setOptions({
+                    maxNumHands:            2,
+                    modelComplexity:        1,
+                    minDetectionConfidence: 0.7,
+                    minTrackingConfidence:  0.5,
+                });
+
+                console.log('Step 5: Registering onResults callback...');
+                hands.onResults(onHandResults);
+
+                handsInstance = hands;
+                state.handsReady = true;
+                console.log('✓✓✓ MediaPipe Hands is READY! ✓✓✓');
+            } catch (err) {
+                console.error('✗ Error creating/configuring MediaPipe Hands:', err);
+                console.error('  Error details:', err.message, err.stack);
+            }
+        }
+
+        // ── CAMERA CONTROLLER ────────────────────────────────────────────────────
+        function updateCamera() {
+            // 10.1 Guard
+            if (!state.threeReady) return;
+
+            // 10.2 Compute target XY from face parallax
+            const targetX = -state.cameraTarget.normX * CONFIG.CAMERA_X_SENSITIVITY;
+            const targetY = -state.cameraTarget.normY * CONFIG.CAMERA_Y_SENSITIVITY;
+
+            // 10.3 Compute target Z from face size (bigger face = closer = higher Z)
+            let targetZ = 600; // default when no face
+            if (state.cameraTarget.normSize > 0) {
+                const t = Math.max(0, Math.min(1,
+                    (state.cameraTarget.normSize - CONFIG.FACE_SIZE_FAR) /
+                    (CONFIG.FACE_SIZE_NEAR - CONFIG.FACE_SIZE_FAR)
+                ));
+                targetZ = CONFIG.CAMERA_Z_FAR + t * (CONFIG.CAMERA_Z_NEAR - CONFIG.CAMERA_Z_FAR);
+            }
+
+            // 10.4 Lerp camera position toward target
+            window.threeCamera.position.x += (targetX - window.threeCamera.position.x) * CONFIG.CAMERA_LERP;
+            window.threeCamera.position.y += (targetY - window.threeCamera.position.y) * CONFIG.CAMERA_LERP;
+            window.threeCamera.position.z += (targetZ - window.threeCamera.position.z) * CONFIG.CAMERA_LERP;
+
+            // 10.5 Always look at origin
+            window.threeCamera.lookAt(0, 0, 0);
+        }
+
+        // ── INTERACTION MANAGER ──────────────────────────────────────────────────
+
+        /**
+         * Converts a normalised video-space point to NDC and raycasts against
+         * the interactive cube.
+         * @param {number} normX  Normalised x in [0, 1]
+         * @param {number} normY  Normalised y in [0, 1]
+         * @returns {Array} Array of THREE.Intersection objects
+         */
+        function raycastFromNormalisedPoint(normX, normY) {
+            const ndc = new THREE.Vector2(normX * 2 - 1, -(normY * 2 - 1));
+            raycaster.setFromCamera(ndc, window.threeCamera);
+            // Slightly expand the ray threshold to make hitting the cube easier
+            raycaster.params.Mesh = { threshold: 10 };
+            return raycaster.intersectObject(window.interactiveCube);
+        }
+
+        /**
+         * Reads state.gestureState and state.interaction, then applies the
+         * appropriate transforms to window.interactiveCube each frame.
+         * Implements the idle / grabbed / pointed / two_hand_rotate state machine.
+         */
+        function updateInteraction() {
+            if (!state.threeReady) return;
+
+            const cube = window.interactiveCube;
+            const interaction = state.interaction;
+            const gs = state.gestureState;
+
+            // Determine active single hand (prefer right, fall back to left)
+            const activeHand = gs.right.gesture !== 'none' ? 'right' :
+                               gs.left.gesture  !== 'none' ? 'left'  : null;
+
+            // ── TWO_HAND_ROTATE ──────────────────────────────────────────────────────
+            if (interaction.mode === 'two_hand_rotate') {
+                // 11.10 Exit condition
+                if (!gs.twoHandPinch) {
+                    interaction.mode = 'idle';
+                } else {
+                    // 11.9 Compute rotation delta from vector change
+                    const lp = gs.left.pinchPoint;
+                    const rp = gs.right.pinchPoint;
+                    if (lp && rp) {
+                        const currentVec = { x: rp.x - lp.x, y: rp.y - lp.y };
+                        if (interaction.prevTwoHandVec) {
+                            const deltaX = currentVec.x - interaction.prevTwoHandVec.x;
+                            const deltaY = currentVec.y - interaction.prevTwoHandVec.y;
+                            cube.rotation.y += deltaX * CONFIG.TWO_HAND_SENSITIVITY;
+                            cube.rotation.x += deltaY * CONFIG.TWO_HAND_SENSITIVITY;
+                        }
+                        interaction.prevTwoHandVec = currentVec;
+                    }
+                }
+            }
+            // ── GRABBED ──────────────────────────────────────────────────────────────
+            else if (interaction.mode === 'grabbed') {
+                const hand = interaction.grabbingHand || activeHand;
+                const handState = gs[hand];
+
+                // 11.4 Exit condition
+                if (!hand || handState.gesture === 'open_hand' || handState.gesture === 'none') {
+                    interaction.mode = 'idle';
+                    interaction.targetObject = null;
+                    interaction.grabOffset = null;
+                    interaction.grabbingHand = null;
+                } else if (handState.pinchPoint) {
+                    // 11.3 Update XY position via projection onto a plane at cube's current Z
+                    const pp = handState.pinchPoint;
+                    const ndc = new THREE.Vector2(pp.x * 2 - 1, -(pp.y * 2 - 1));
+                    raycaster.setFromCamera(ndc, window.threeCamera);
+
+                    // Project onto a plane at cube's current Z
+                    const planeZ = cube.position.z;
+                    const t = (planeZ - window.threeCamera.position.z) / raycaster.ray.direction.z;
+                    const worldX = window.threeCamera.position.x + raycaster.ray.direction.x * t;
+                    const worldY = window.threeCamera.position.y + raycaster.ray.direction.y * t;
+
+                    cube.position.x = worldX + interaction.grabOffset.x;
+                    cube.position.y = worldY + interaction.grabOffset.y;
+
+                    // Depth from bounding box width
+                    const bbox = handState.bbox;
+                    if (bbox) {
+                        const bboxWidth = bbox.maxX - bbox.minX;
+                        const t2 = Math.max(0, Math.min(1,
+                            (bboxWidth - CONFIG.HAND_SIZE_MIN) / (CONFIG.HAND_SIZE_MAX - CONFIG.HAND_SIZE_MIN)
+                        ));
+                        const targetZ = CONFIG.DEPTH_MAX - t2 * (CONFIG.DEPTH_MAX - CONFIG.DEPTH_MIN);
+                        cube.position.z += (targetZ - cube.position.z) * CONFIG.DEPTH_LERP;
+                        cube.position.z = Math.max(CONFIG.DEPTH_MIN, Math.min(CONFIG.DEPTH_MAX, cube.position.z));
+                    }
+                }
+            }
+            // ── POINTED ──────────────────────────────────────────────────────────────
+            else if (interaction.mode === 'pointed') {
+                const hand = interaction.pointingHand || activeHand;
+                const handState = gs[hand];
+
+                // 11.7 Exit condition
+                if (!hand || handState.gesture !== 'point') {
+                    interaction.mode = 'idle';
+                    interaction.pointingHand = null;
+                    interaction.prevIndexPos = null;
+                } else if (handState.indexTip) {
+                    // 11.6 Rotate based on horizontal velocity of index tip
+                    const currentIndexTip = handState.indexTip;
+                    if (interaction.prevIndexPos) {
+                        const velocityX = currentIndexTip.x - interaction.prevIndexPos.x;
+                        cube.rotation.y += velocityX * CONFIG.ROTATE_SENSITIVITY;
+                    }
+                    interaction.prevIndexPos = { x: currentIndexTip.x, y: currentIndexTip.y };
+                }
+            }
+            // ── IDLE ─────────────────────────────────────────────────────────────────
+            else {
+                // 11.8 Idle → two_hand_rotate
+                if (gs.twoHandPinch) {
+                    interaction.mode = 'two_hand_rotate';
+                    const lp = gs.left.pinchPoint;
+                    const rp = gs.right.pinchPoint;
+                    if (lp && rp) {
+                        interaction.prevTwoHandVec = { x: rp.x - lp.x, y: rp.y - lp.y };
+                    }
+                }
+                // 11.2 Idle → grabbed (single hand pinch)
+                else if (!gs.twoHandPinch) {
+                    for (const hand of ['right', 'left']) {
+                        if (gs[hand].gesture === 'pinch' && gs[hand].pinchPoint) {
+                            const pp = gs[hand].pinchPoint;
+                            const hits = raycastFromNormalisedPoint(pp.x, pp.y);
+                            if (hits.length > 0) {
+                                interaction.mode = 'grabbed';
+                                interaction.targetObject = cube;
+                                interaction.grabbingHand = hand;
+                                // Compute grab offset: cube world pos - hit point
+                                const hitPoint = hits[0].point;
+                                interaction.grabOffset = {
+                                    x: cube.position.x - hitPoint.x,
+                                    y: cube.position.y - hitPoint.y,
+                                };
+                                break;
+                            }
+                        }
+                    }
+                }
+                // 11.5 Idle → pointed
+                if (interaction.mode === 'idle') {
+                    for (const hand of ['right', 'left']) {
+                        if (gs[hand].gesture === 'point' && gs[hand].indexTip) {
+                            const tip = gs[hand].indexTip;
+                            const hits = raycastFromNormalisedPoint(tip.x, tip.y);
+                            if (hits.length > 0) {
+                                interaction.mode = 'pointed';
+                                interaction.pointingHand = hand;
+                                interaction.prevIndexPos = { x: tip.x, y: tip.y };
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 11.11 Visual feedback via emissive colour
+            if (interaction.mode === 'grabbed') {
+                cube.material.emissive.set(0x224488);
+            } else if (interaction.mode === 'pointed') {
+                cube.material.emissive.set(0x442200);
+            } else if (interaction.mode === 'idle') {
+                // Hover: check if any active hand is over the cube
+                let hovering = false;
+                for (const hand of ['right', 'left']) {
+                    const gs_hand = gs[hand];
+                    const tip = gs_hand.pinchPoint || gs_hand.indexTip;
+                    if (tip) {
+                        const hits = raycastFromNormalisedPoint(tip.x, tip.y);
+                        if (hits.length > 0) { hovering = true; break; }
+                    }
+                }
+                cube.material.emissive.set(hovering ? 0x222222 : 0x000000);
+            } else {
+                cube.material.emissive.set(0x000000);
+            }
+        }
+
+        // ── MAIN LOOP ─────────────────────────────────────────────────────────
+        let lastFaceTime  = 0;
+        let lastHandsTime = 0;
+
+        function updateDebugInfo() {
+            document.getElementById('debug-camera').textContent = state.cameraReady ? 'Ready' : 'Not Ready';
+            document.getElementById('debug-camera').className = state.cameraReady ? 'ready' : 'not-ready';
+            
+            document.getElementById('debug-three').textContent = state.threeReady ? 'Ready' : 'Not Ready';
+            document.getElementById('debug-three').className = state.threeReady ? 'ready' : 'not-ready';
+            
+            document.getElementById('debug-hands').textContent = state.handsReady ? 'Ready' : 'Not Ready';
+            document.getElementById('debug-hands').className = state.handsReady ? 'ready' : 'not-ready';
+            
+            document.getElementById('debug-cv').textContent = state.cvReady ? 'Ready' : 'Not Ready';
+            document.getElementById('debug-cv').className = state.cvReady ? 'ready' : 'not-ready';
+            
+            const handsCount = state.latestLandmarks ? state.latestLandmarks.length : 0;
+            document.getElementById('debug-hands-count').textContent = handsCount;
+            
+            document.getElementById('debug-left-gesture').textContent = state.gestureState.left.gesture;
+            document.getElementById('debug-right-gesture').textContent = state.gestureState.right.gesture;
+            document.getElementById('debug-interaction').textContent = state.interaction.mode;
+        }
+
+        function mainLoop(timestamp) {
+            const video        = document.getElementById('videoFeed');
+            const outputCanvas = document.getElementById('outputCanvas');
+            const outputCtx    = outputCanvas.getContext('2d');
+
+            // 12.1 Draw webcam frame, face bounding box, then hand skeleton on top
+            if (state.cameraReady) {
+                outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
+
+                if (state.currentFaceRect) {
+                    const r = state.currentFaceRect;
+                    outputCtx.strokeStyle = '#F67D3E';
+                    outputCtx.lineWidth   = 2;
+                    outputCtx.strokeRect(r.x, r.y, r.width, r.height);
+                }
+
+                // Draw hand skeleton and cursors on top of the fresh video frame
+                drawHandSkeleton(state.latestLandmarks);
+                drawHandCursors();
+            }
+
+            // 12.2 Three.js update and render
+            if (state.threeReady) {
+                updateCamera();
+                updateInteraction();
+                window.threeRenderer.render(window.threeScene, window.threeCamera);
+            }
+
+            // 12.3 Throttled face detection
+            if (timestamp - lastFaceTime > 1000 / CONFIG.FACE_FPS) {
+                detectFace();
+                lastFaceTime = timestamp;
+            }
+
+            // 12.4 Throttled hand detection
+            if (state.handsReady && timestamp - lastHandsTime > 1000 / CONFIG.HANDS_FPS) {
+                // Only send if video is actually playing and has valid dimensions
+                if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0) {
+                    try {
+                        handsInstance.send({ image: video });
+                    } catch (err) {
+                        console.error('Error sending frame to MediaPipe Hands:', err);
+                    }
+                }
+                lastHandsTime = timestamp;
+            }
+
+            // 12.5 Schedule next frame
+            updateDebugInfo();
+            requestAnimationFrame(mainLoop);
+        }
+
+        // ── BOOTSTRAP ─────────────────────────────────────────────────────────
+        async function startAppFlow() {
+            // 13.1 Mobile guard
+            if (window.innerWidth <= 768) {
+                document.getElementById('mobile-notice').style.display = 'flex';
+                return;
+            }
+
+            // 13.2 Await webcam first (starts mainLoop internally), then fire others concurrently
+            await initWebcam();
+            // initThreeScene() was already called synchronously above
+            initMediaPipeHands();
+            initOpenCv();
+        }
+
+        // 13.3 Start the app
+        startAppFlow();
+    </script>
+</body>
+</html>
