@@ -805,6 +805,11 @@
                 hands.onResults(onHandResults);
 
                 handsInstance = hands;
+                
+                console.log('Step 6: Waiting for MediaPipe to fully initialize...');
+                // Wait a bit for WASM to initialize before marking as ready
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
                 state.handsReady = true;
                 console.log('✓✓✓ MediaPipe Hands is READY! ✓✓✓');
             } catch (err) {
@@ -1085,13 +1090,20 @@
             }
 
             // 12.4 Throttled hand detection
-            if (state.handsReady && timestamp - lastHandsTime > 1000 / CONFIG.HANDS_FPS) {
+            if (state.handsReady && handsInstance && timestamp - lastHandsTime > 1000 / CONFIG.HANDS_FPS) {
                 // Only send if video is actually playing and has valid dimensions
                 if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0) {
                     try {
                         handsInstance.send({ image: video });
                     } catch (err) {
                         console.error('Error sending frame to MediaPipe Hands:', err);
+                        // If we get repeated errors, disable hands to prevent spam
+                        if (!window.handsErrorCount) window.handsErrorCount = 0;
+                        window.handsErrorCount++;
+                        if (window.handsErrorCount > 10) {
+                            console.error('Too many MediaPipe errors, disabling hand detection');
+                            state.handsReady = false;
+                        }
                     }
                 }
                 lastHandsTime = timestamp;
