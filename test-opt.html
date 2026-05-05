@@ -18,7 +18,10 @@
         }
     }
     </script>
-    <!-- MediaPipe Hands will be loaded dynamically -->
+    <!-- MediaPipe Hands — loaded from Google's official CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424926/hands.js"
+            crossorigin="anonymous"
+            onerror="window._mpHandsLoadError=true"></script>
     
     <style>
         body { margin: 0; overflow: hidden; background: #ffffff; font-family: 'Geist Mono', monospace; }
@@ -150,6 +153,7 @@
 
     <canvas id="canvas3d" tabindex="1"></canvas>
     <canvas id="processingCanvas" width="160" height="120" style="display:none;"></canvas>
+    <canvas id="handsInputCanvas" width="320" height="240" style="display:none;"></canvas>
 
     <div id="debug-info">
         <div class="status-line">Camera: <span id="debug-camera" class="not-ready">Not Ready</span></div>
@@ -724,97 +728,85 @@
         // ── MEDIAPIPE HANDS INIT ──────────────────────────────────────────────
         async function initMediaPipeHands() {
             console.log('=== MediaPipe Hands Initialization Started ===');
-            
-            // Dynamically load the MediaPipe Hands script
-            try {
-                console.log('Step 1: Loading MediaPipe Hands script from CDN...');
-                await new Promise((resolve, reject) => {
-                    const script = document.createElement('script');
-                    script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js';
-                    script.crossOrigin = 'anonymous';
-                    script.onload = () => {
-                        console.log('✓ MediaPipe Hands script loaded successfully');
-                        resolve();
-                    };
-                    script.onerror = (err) => {
-                        console.error('✗ Failed to load MediaPipe Hands script:', err);
-                        console.error('  URL:', script.src);
-                        console.error('  This might be a network issue or CORS problem');
-                        reject(err);
-                    };
-                    document.head.appendChild(script);
-                });
-            } catch (err) {
-                console.error('Failed to load script, aborting MediaPipe initialization');
-                return;
-            }
-            
-            // Wait for the Hands constructor to be available
-            console.log('Step 2: Waiting for Hands constructor to be available...');
-            
-            let attempts = 0;
-            const maxAttempts = 100; // 5 seconds max wait
-            
-            try {
-                await new Promise((resolve, reject) => {
-                    const check = () => {
-                        attempts++;
-                        
-                        if (typeof Hands !== 'undefined') {
-                            console.log('✓ Hands constructor is available!');
-                            console.log('  Type:', typeof Hands);
-                            resolve();
-                        } else if (attempts >= maxAttempts) {
-                            console.error('✗ Hands constructor not available after 5 seconds');
-                            console.error('  Attempts:', attempts);
-                            console.error('  Available window properties:', Object.keys(window).filter(k => k.toLowerCase().includes('hand')));
-                            reject(new Error('MediaPipe Hands timeout'));
-                        } else {
-                            if (attempts % 20 === 0) {
-                                console.log(`  Still waiting... (attempt ${attempts}/${maxAttempts})`);
-                            }
-                            setTimeout(check, 50);
-                        }
-                    };
-                    check();
-                });
-            } catch (err) {
-                console.error('Failed waiting for Hands constructor, aborting');
-                return;
+
+            // Try loading from multiple CDNs in order
+            const cdnUrls = [
+                'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424926/hands.js',
+                'https://unpkg.com/@mediapipe/hands@0.4.1646424926/hands.js',
+            ];
+
+            // If the static script tag already loaded it, skip dynamic loading
+            if (typeof Hands === 'undefined') {
+                let loaded = false;
+                for (const url of cdnUrls) {
+                    if (loaded) break;
+                    console.log('Trying CDN:', url);
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const s = document.createElement('script');
+                            s.src = url;
+                            s.onload  = () => { console.log('✓ Loaded from', url); resolve(); };
+                            s.onerror = () => { console.warn('✗ Failed:', url); reject(); };
+                            document.head.appendChild(s);
+                        });
+                        loaded = true;
+                    } catch (_) { /* try next */ }
+                }
+                if (!loaded) {
+                    console.error('All CDNs failed. Hand tracking unavailable.');
+                    return;
+                }
+            } else {
+                console.log('✓ Hands already available from static script tag');
             }
 
-            console.log('Step 3: Creating Hands instance...');
+            // Wait for constructor
+            await new Promise((resolve, reject) => {
+                let n = 0;
+                const t = setInterval(() => {
+                    if (typeof Hands !== 'undefined') { clearInterval(t); resolve(); }
+                    else if (++n > 100) { clearInterval(t); reject(new Error('Hands constructor timeout')); }
+                }, 50);
+            }).catch(e => { console.error(e); });
+
+            if (typeof Hands === 'undefined') return;
+
+            console.log('Creating Hands instance...');
             try {
                 const hands = new Hands({
                     locateFile: (file) => {
-                        const url = `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-                        console.log('  MediaPipe requesting file:', file);
+                        // Use the same CDN that successfully loaded hands.js
+                        const url = `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424926/${file}`;
+                        console.log('  locateFile:', file, '→', url);
                         return url;
                     },
                 });
 
-                console.log('Step 4: Setting Hands options...');
                 hands.setOptions({
                     maxNumHands:            2,
-                    modelComplexity:        1,
-                    minDetectionConfidence: 0.7,
+                    modelComplexity:        0,
+                    minDetectionConfidence: 0.5,
                     minTrackingConfidence:  0.5,
                 });
 
-                console.log('Step 5: Registering onResults callback...');
                 hands.onResults(onHandResults);
 
+                // Warm up: send one real frame so WASM allocates memory before the loop
+                console.log('Warming up MediaPipe (first send)...');
+                const video = document.getElementById('videoFeed');
+                await new Promise(resolve => setTimeout(resolve, 500));
+                try {
+                    await hands.send({ image: video });
+                    console.log('✓ Warm-up send succeeded');
+                } catch (e) {
+                    console.warn('Warm-up send failed (may be ok):', e.message);
+                }
+
                 handsInstance = hands;
-                
-                console.log('Step 6: Waiting for MediaPipe to fully initialize...');
-                // Wait a bit for WASM to initialize before marking as ready
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
                 state.handsReady = true;
-                console.log('✓✓✓ MediaPipe Hands is READY! ✓✓✓');
+                console.log('✓✓✓ MediaPipe Hands READY ✓✓✓');
             } catch (err) {
-                console.error('✗ Error creating/configuring MediaPipe Hands:', err);
-                console.error('  Error details:', err.message, err.stack);
+                console.error('Error initializing Hands:', err);
             }
         }
 
@@ -1091,20 +1083,8 @@
 
             // 12.4 Throttled hand detection
             if (state.handsReady && handsInstance && timestamp - lastHandsTime > 1000 / CONFIG.HANDS_FPS) {
-                // Only send if video is actually playing and has valid dimensions
                 if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0) {
-                    try {
-                        handsInstance.send({ image: video });
-                    } catch (err) {
-                        console.error('Error sending frame to MediaPipe Hands:', err);
-                        // If we get repeated errors, disable hands to prevent spam
-                        if (!window.handsErrorCount) window.handsErrorCount = 0;
-                        window.handsErrorCount++;
-                        if (window.handsErrorCount > 10) {
-                            console.error('Too many MediaPipe errors, disabling hand detection');
-                            state.handsReady = false;
-                        }
-                    }
+                    handsInstance.send({ image: video }).catch(() => {});
                 }
                 lastHandsTime = timestamp;
             }
